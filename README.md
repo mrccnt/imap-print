@@ -27,6 +27,7 @@ IMAP_PASS=mypassword
 IMAP_MBOX=INBOX
 CUPS_PRINTER=Officejet-6000-E609a
 ALLOWED=marco@example.com:someone@somewhere.com
+EXTENSIONS=doc:pdf
 ```
 
 ## Application Options
@@ -47,41 +48,20 @@ COMMANDS:
    help, h  Shows a list of commands or help for one command
 
 GLOBAL OPTIONS:
-   --addr HOST:PORT, -a HOST:PORT    The IMAP server address HOST:PORT
-   --user USER, -u USER              The IMAP account USER
-   --pass PASS, -p PASS              The IMAP account PASS
-   --mbox NAME, -m NAME              The mailbox NAME (default: "INBOX")
-   --printer PRINTER, --prt PRINTER  The cups PRINTER name
-   --allowed ADRESSES                List of allowed sender email ADRESSES seperated by ":"
-   --dry-run, -d                     Execute a dry-run (default: false)
-   --verbose, --vv                   Verbose output (default: false)
-   --help, -h                        show help (default: false)
-   --version, -v                     print the version (default: false)
+   --addr HOST:PORT, -a HOST:PORT            The IMAP server address HOST:PORT
+   --user USER, -u USER                      The IMAP account USER
+   --pass PASS, -p PASS                      The IMAP account PASS
+   --mbox NAME, -m NAME                      The mailbox NAME (default: "INBOX")
+   --printer PRINTER, --prt PRINTER          The cups PRINTER name
+   --allowed ADRESSES, --all ADRESSES        List of allowed sender email ADRESSES seperated by ":"
+   --extensions EXTENSIONS, --xt EXTENSIONS  List of allowed EXTENSIONS seperated by ":"
+   --dry-run, -d                             Execute a dry-run (default: false)
+   --verbose, --vv                           Verbose output (default: false)
+   --help, -h                                show help (default: false)
+   --version, -v                             print the version (default: false)
 
-```
-
-In addition to only configure each run, you can also trigger a dry-run to test what is going on. A more verbose mode is
-also available.
-
-## Cups Bash
-
-To get an idea of available/usable cups CLI calls:
-
-```bash
-prtname=Officejet-6000-E609a
-
-# All printers
-lpstat -p -d
-
-# Printer details
-lpoptions -p ${prtname}
-
-# Print file
-lp -d ${prtname} ~/Documents/sample.pdf
 ```
 
 ## TODO
 
- * Replace exec.Command() calls by original cups api calls via C headers
- * Implement restriction to a set of printable document types (extensions)
  * Implement response email with results

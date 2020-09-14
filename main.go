@@ -15,20 +15,19 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"github.com/caarlos0/env"
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/client"
 	"github.com/emersion/go-message/mail"
 	"github.com/joho/godotenv"
+	"github.com/phin1x/go-ipp"
 	"github.com/urfave/cli/v2"
 	"gopkg.in/go-playground/validator.v9"
 	"io"
 	"io/ioutil"
 	"log"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 )
@@ -36,18 +35,17 @@ import (
 // Some constants
 const (
 	// Options/Argument names
-	ArgAddr = "addr"
-	ArgUser = "user"
-	ArgPass = "pass"
-	ArgMbox = "mbox"
-	ArgPrt  = "printer"
-	ArgDry  = "dry-run"
-	ArgAllowed = "allowed"
-	ArgVerbose  = "verbose"
+	ArgAddr       = "addr"
+	ArgUser       = "user"
+	ArgPass       = "pass"
+	ArgMbox       = "mbox"
+	ArgPrt        = "printer"
+	ArgDry        = "dry-run"
+	ArgAllowed    = "allowed"
+	ArgExtensions = "extensions"
+	ArgVerbose    = "verbose"
 	// Default mailbox name
 	MailboxName = "INBOX"
-	// For textual representations
-	Separator = "-----------------------------------------------------"
 )
 
 // Command is the main action and its resources
@@ -78,9 +76,10 @@ type Attachment struct {
 
 // Config is our main configuration store
 type Config struct {
-	IMAP *IMAPConfig
-	Cups *CupsConfig
-	Allowed []string `env:"ALLOWED" envSeparator:":"`
+	IMAP       *IMAPConfig
+	Cups       *CupsConfig
+	Allowed    []string `env:"ALLOWED" envSeparator:":"`
+	Extensions []string `env:"EXTENSIONS" envSeparator:":"`
 }
 
 // IMAPConfig holds IMAP related configurations
@@ -126,8 +125,7 @@ func (cmd *Command) action(c *cli.Context) error {
 	defer cmd.shutdown()
 
 	if cmd.mbox.Messages == 0 {
-		cmd.logpad("No Messages", "Nothing to do")
-		cmd.logpad(Separator)
+		cmd.logpad("No Messages", "Nothing to do...")
 		os.Exit(0)
 	}
 
@@ -141,12 +139,8 @@ func (cmd *Command) action(c *cli.Context) error {
 
 	attachments := cmd.getAttachments(mails)
 
-	cmd.logpad(Separator)
-
 	cmd.delexpunge(cmd.mclient, seqset)
 	cmd.doprint(attachments)
-
-	cmd.logpad("Status", "Done!")
 
 	return nil
 }
@@ -188,15 +182,19 @@ func (cmd *Command) bootstrap(c *cli.Context) error {
 		return cli.NewExitError(err, 1)
 	}
 
-	cmd.logpad(Separator)
 	cmd.logverb("IMAP Addr", cmd.cfg.IMAP.Addr)
 	cmd.logverb("IMAP User", cmd.cfg.IMAP.User)
 	cmd.logverb("IMAP Pass", "*****")
 	cmd.logverb("Mailbox", cmd.cfg.IMAP.Mailbox)
 	cmd.logverb("Printer", cmd.cfg.Cups.Printer)
-	cmd.logpad("Dry-Run", cmd.DryRun)
+	if cmd.DryRun {
+		cmd.logpad("Dry-Run", cmd.DryRun)
+	} else {
+		cmd.logverb("Dry-Run", cmd.DryRun)
+	}
 	cmd.logverb("TmpDir", cmd.TmpDir)
 	cmd.logverb("Allowed", cmd.cfg.Allowed)
+	cmd.logverb("Extensions", cmd.cfg.Extensions)
 
 	return nil
 }
@@ -249,7 +247,7 @@ func (cmd *Command) getAttachments(mails []*Mail) []*Attachment {
 
 	for _, m := range mails {
 		cmd.logmail(m)
-		if !m.isValid(cmd.cfg.Allowed) {
+		if !m.isValid(cmd.cfg.Allowed, cmd.cfg.Extensions) {
 			continue
 		}
 		for _, attachment := range m.Attachments {
@@ -384,29 +382,30 @@ func (cmd *Command) delexpunge(c *client.Client, seqset *imap.SeqSet) {
 
 // doprint loops through attachments and triggers the print
 func (cmd *Command) doprint(attachments []*Attachment) {
+
 	if attachments == nil {
 		cmd.logpad("Printing", "Nothing to do")
 		return
 	}
+
+	cups := ipp.NewCUPSClient("localhost", 631, "", "", false)
+
 	for _, attachment := range attachments {
 
-		cmd.logverb("Printing", attachment.File)
+		cmd.logpad("Printing", attachment.File)
 
 		if cmd.DryRun {
-			cmd.logpad("Printing", "OK; request id is", cmd.cfg.Cups.Printer + "-123456")
+			cmd.logverb("JobID", "123456")
 			continue
 		}
 
-		var out bytes.Buffer
-
-		cmdExec := exec.Command("lp", "-d", cmd.cfg.Cups.Printer, attachment.File)
-		cmdExec.Stdout = &out
-
-		if err := cmdExec.Run(); err != nil {
-			cmd.logverb("Printing", err.Error())
+		job, err := cups.PrintFile(attachment.File, cmd.cfg.Cups.Printer, map[string]interface{}{})
+		if err != nil {
+			cmd.logverb("JobID", err.Error())
+			continue
 		}
 
-		cmd.logverb("Printing", "OK; " + strings.TrimSpace(string(out.Bytes())))
+		cmd.logverb("JobID", job)
 	}
 }
 
@@ -422,8 +421,8 @@ func (cmd *Command) config() error {
 	}
 
 	cmd.cfg = &Config{
-		IMAP: &IMAPConfig{},
-		Cups: &CupsConfig{},
+		IMAP:    &IMAPConfig{},
+		Cups:    &CupsConfig{},
 		Allowed: []string{},
 	}
 
@@ -437,6 +436,7 @@ func (cmd *Command) config() error {
 	cmd.setarg(ArgMbox)
 	cmd.setarg(ArgPrt)
 	cmd.setarg(ArgAllowed)
+	cmd.setarg(ArgExtensions)
 
 	validate := validator.New()
 	err = validate.Struct(cmd.cfg)
@@ -467,17 +467,9 @@ func (cmd *Command) setarg(name string) {
 	case name == ArgPrt && v != "":
 		cmd.cfg.Cups.Printer = v
 	case name == ArgAllowed && v != "":
-		if strings.Contains(v, ":") {
-			cmd.cfg.Allowed = []string{}
-			parts := strings.Split(v, ":")
-			for _, part := range parts {
-				if strings.TrimSpace(part) != "" {
-					cmd.cfg.Allowed = append(cmd.cfg.Allowed, strings.TrimSpace(part))
-				}
-			}
-			return
-		}
-		cmd.cfg.Allowed = []string{v}
+		cmd.cfg.Allowed = strings.Split(v, ":")
+	case name == ArgExtensions && v != "":
+		cmd.cfg.Extensions = strings.Split(v, ":")
 	}
 }
 
@@ -507,7 +499,7 @@ func (cmd *Command) flags() []cli.Flag {
 			Aliases:  []string{"m"},
 			Usage:    "The mailbox `NAME`",
 			Required: false,
-			Value: MailboxName,
+			Value:    MailboxName,
 		},
 		&cli.StringFlag{
 			Name:     ArgPrt,
@@ -517,7 +509,14 @@ func (cmd *Command) flags() []cli.Flag {
 		},
 		&cli.StringFlag{
 			Name:     ArgAllowed,
+			Aliases:  []string{"all"},
 			Usage:    "List of allowed sender email `ADRESSES` seperated by \":\"",
+			Required: false,
+		},
+		&cli.StringFlag{
+			Name:     ArgExtensions,
+			Aliases:  []string{"xt"},
+			Usage:    "List of allowed `EXTENSIONS` seperated by \":\"",
 			Required: false,
 		},
 		&cli.BoolFlag{
@@ -547,19 +546,21 @@ func (cmd *Command) shutdown() {
 
 // logmail prints out *Mail related details
 func (cmd *Command) logmail(m *Mail) {
-	cmd.logpad(Separator)
-	cmd.logpad("Date", m.Date)
-	cmd.logpad("From", m.From)
-	cmd.logpad("Subject", m.Subject)
-	cmd.logpad("Text", m.Body)
-	cmd.logpad("Attachments", len(m.Attachments))
-	cmd.logpad("ValidSender", m.isValidSender(cmd.cfg.Allowed))
-	cmd.logpad("HasAttachments", m.hasAttachments())
-	if m.isValid(cmd.cfg.Allowed) {
-		cmd.logpad("Status", "Ok!")
+	cmd.logverb("----- BEGIN MAIL -----")
+	cmd.logverb("Date", m.Date)
+	cmd.logverb("From", m.From)
+	cmd.logverb("Subject", m.Subject)
+	cmd.logverb("Text", m.Body)
+	cmd.logverb("Attachments", len(m.Attachments))
+	cmd.logverb("ValidSender", m.isValidSender(cmd.cfg.Allowed))
+	cmd.logverb("HasAttachments", m.hasAttachments())
+	cmd.logverb("ValidAttachments", m.validAttachments(cmd.cfg.Extensions))
+	if m.isValid(cmd.cfg.Allowed, cmd.cfg.Extensions) {
+		cmd.logverb("Status", "Ok!")
 	} else {
-		cmd.logpad("Status", "Will be ignored...")
+		cmd.logverb("Status", "Will be ignored...")
 	}
+	cmd.logverb("----- END MAIL -----")
 }
 
 // logpad prints out a predefined key-value output
@@ -576,8 +577,8 @@ func (cmd *Command) logpad(title string, v ...interface{}) {
 		t += ": "
 	}
 
-	if len(t) < 17 {
-		t += strings.Repeat(" ", 17 - len(t))
+	if len(t) < 20 {
+		t += strings.Repeat(" ", 20-len(t))
 	}
 
 	var items []interface{}
@@ -598,10 +599,9 @@ func (cmd *Command) logverb(title string, v ...interface{}) {
 	}
 }
 
-
 // isValid checks if mail is valid for printing
-func (m *Mail) isValid(allowed []string) bool {
-	return m.hasAttachments() && m.isValidSender(allowed)
+func (m *Mail) isValid(allowed []string, extensions []string) bool {
+	return m.hasAttachments() && m.validAttachments(extensions) && m.isValidSender(allowed)
 }
 
 // hasAttachments checks if *Mail has attachments
@@ -609,10 +609,30 @@ func (m *Mail) hasAttachments() bool {
 	return len(m.Attachments) > 0
 }
 
+// validAttachments checks if *Mail has any valid attachment
+func (m *Mail) validAttachments(extensions []string) bool {
+	if len(m.Attachments) == 0 {
+		return false
+	}
+	for _, attachment := range m.Attachments {
+		parts := strings.Split(attachment.File, ".")
+		if len(parts) > 1 {
+			if inArrStr(strings.ToLower(parts[len(parts)-1]), extensions) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // isValidSender checks if *Mail has a valid sender
 func (m *Mail) isValidSender(allowed []string) bool {
-	for _, item := range allowed {
-		if item == m.From {
+	return inArrStr(m.From, allowed)
+}
+
+func inArrStr(s string, a []string) bool {
+	for _, v := range a {
+		if v == s {
 			return true
 		}
 	}
